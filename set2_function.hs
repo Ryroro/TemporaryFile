@@ -58,3 +58,38 @@ larger a b
 chop::Int->(Int, Int)
 chop a
     | 
+    
+    
+    
+twoSame::[Int]->Bool
+twoSame (x:xs)
+  | x `elem` xs = True
+  | otherwise   = twoSame xs
+twoSame [] = False
+
+fib::Int->Int
+fib a
+  | a == 0 = 0
+  | a == 1 = 1
+  | otherwise = fib (a-1) + fib (a-2)
+
+fib'::Int->Int->Int->Int
+fib' k k' c
+  | c == 0 = k+k'
+  | otherwise = fib' k' (k+k') (c-1)
+
+fib2::Int->Int
+fib2 x
+  | x == 0 = 0
+  | x == 1 = 1
+  | otherwise = fib' 0 1 (x-2)
+
+goldenRatio::Float->Float
+goldenRatio = helper 1 0 1
+            where e = exp 1
+                  helper r r' n
+                    | abs (r-r') < e && r' /= 0 = r
+                    | otherwise = helper rNew r' (n+1)
+                                where rNew = fromIntegral (fib2 n+1) / fromIntegral (fib2 n)
+             
+
