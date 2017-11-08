@@ -1,414 +1,460 @@
-module Exam where
-
-import Data.Char
 import Data.Maybe
-  
-type Name = String
 
-type Attributes = [(Name, String)]
+-- All programs are assumed to be well-formed in the following sense:
+--
+-- All operators, functions and procedures will always be applied
+-- to the correct number of arguments, all of which will be of the appropriate
+-- type.
+--
+-- Boolean-valued expressions will always evaluate to either 0 (false) or 1
+-- (true).
+--
+-- In an array element assignment the array being assigned to will always be 
+-- in scope.
+--
+-- In a procedure call of the form Call x p es the procedure p will always exit 
+-- via a Return statement.
+--
+-- A Return statement will always be the last statement to be executed in a 
+-- procedure's defining code block (there is no `dead code').
+--
 
-data XML = Null | Text String | Element Name Attributes [XML]
+--------------------------------------------------------------------
+type Id = String
+
+data Value = I Int | A [(Int, Int)]
+           deriving (Eq, Show)
+
+data Op = Add | Mul | Less | Equal | Index
+          deriving (Eq, Show)
+
+data Exp = Const Value | 
+           Var Id | 
+           OpApp Op Exp Exp |
+           Cond Exp Exp Exp |
+           FunApp Id [Exp] 
          deriving (Eq, Show)
 
-type Stack = [XML]
+type FunDef = (Id, ([Id], Exp))
 
------------------------------------------------------------------------
--- Some useful show/print functions
+type Block = [Statement]
 
--- The 'show' function for XML objects
-showXML :: XML -> String
-showXML (Text t)
-  = t
-showXML (Element n as es)
-  = "<" ++ n ++ showAtts as ++ ">" ++ concatMap showXML es ++ "</" ++ n ++ ">"
-  where
-    showAtts as = concatMap showAtt as
-    showAtt (n, v) = " " ++ n ++ "=" ++ "\"" ++ v ++ "\""
+data Statement = Assign Id Exp |
+                 AssignA Id Exp Exp |
+                 If Exp Block Block |
+                 While Exp Block |
+                 Call Id Id [Exp] |
+                 Return Exp 
+               deriving (Eq, Show)
 
--- The 'show' function for lists of XML objects
-showXMLs :: [XML] -> String
-showXMLs
-  = concatMap showXML
+type ProcDef = (Id, ([Id], Block))
 
--- Prints an XML object to the terminal
-printXML :: XML -> IO()
-printXML 
-  = putStrLn . showXML
+data Scope = Local | Global
+           deriving (Eq, Show)
 
--- Prints a list of XML objects to the terminal (useful for testing the
--- output from expandXML')
-printXMLs :: [XML] -> IO()
-printXMLs
-  = mapM_ printXML
+type Binding = (Id, (Scope, Value))
 
------------------------------------------------------------------------
------------------------------------------------------------------------
+type State = [Binding]
+
+--------------------------------------------------------------------
 -- Part I
 
-skipSpace :: String -> String
-skipSpace input = dropWhile isSpace input
+getValue :: Id -> State -> Value
+-- Pre: The identifier has a binding in the state
+getValue id state = snd $ lookUp id state
 
-getAttribute :: String -> XML -> String
-getAttribute input Null = ""
-getAttribute input (Text s) = ""
-getAttribute input (Element name attrs xmls) =
-  case getAttribute' input attrs of
-    [a] -> a
-    [] -> concat (map (getAttribute input) xmls)
+getLocals :: State -> State
+getLocals state =
+  filter (\x -> case x of
+                  (id, (Local, val)) -> True
+                  otherwise          -> False) state
 
-  where getAttribute' input attrs =
-         [s | (n, s) <- attrs, n == input]
+getGlobals :: State -> State
+getGlobals state
+  = filter (\x -> case x of
+                    (id, (Global, val)) -> True
+                    otherwise          -> False) state
 
-getChildren :: String -> XML -> [XML]
-getChildren input Null = []
-getChildren input (Text s) = []
-getChildren input (Element name attrs xmls) =
-  case name == input of
-    True -> [(Element name attrs xmls)]
-    False -> concat $ map (getChildren input) xmls
 
-getChild :: String -> XML -> XML
-getChild input Null = Text ""
-getChild input (Text s) = Text ""
-getChild input (Element name attrs xmls) =
-  case name == input of
-    True -> Element name attrs xmls
-    False -> head $ map (getChild input) xmls
+assignArray :: Value -> Value -> Value -> Value
+-- The arguments are the array, index and (new) value respectively
+-- Pre: The three values have the appropriate value types (array (A), 
+--      integer (I) and integer (I)) respectively.
+assignArray (A array) (I i) (I v)
+  = A ((i, v) : (filter (\(i', v') -> i' /= i) array))
 
-addChild :: XML -> XML -> XML
--- Pre: the second argument is an Element
-addChild xml (Element name attrs xmls) =
-  Element name attrs (xmls ++ [xml])
+updateVar :: (Id, Value) -> State -> State
+updateVar (i, I v) state
+  | inLocals i state = (i, (Local, I v)) : (filter (\x-> case x of
+                                                           (id, (Local, I val)) -> id /= i
+                                                           otherwise -> True) state)
+  | inGlobals i state = (i, (Global, I v)) : (filter (\x -> case x of
+                                                           (id,(Global, I val))-> id /= i
+                                                           otherwise -> True) state) 
+                                                            
+  | otherwise = (i, (Local, I v)) : state
 
-getValue :: XML -> XML
-getValue Null = Text ""
-getValue (Text s) = Text s
-getValue (Element name attrs xmls) =
-  Text (concat (map getValue' (map getValue xmls)))
-  where getValue' (Text x) = x 
 
--------------------------------------------------------------------------
+inLocals i state = or $ map (\x -> case x of
+                                     (id, (Local, I v)) -> i == id
+                                     otherwise -> False) state
+inGlobals i state = or $ map (\x -> case x of
+                                      (id, (Global, I v)) -> i == id
+                                      otherwise -> False) state
+
+---------------------------------------------------------------------
 -- Part II
 
--- Parses an element/attribute name
-parseName :: String -> (Name, String)
-parseName []
-  = error "Error: attempt to read empty name"
-parseName s@(c : cs)
-  | isAlpha c = break (not . isNameChar) s
-  | otherwise = error ("parseName error: name " ++ show s ++
-                      " must begin with a letter")
-  where
-    isNameChar c = isAlpha c || isDigit c || elem c "-."
+toBool True = 1
+toBool False = 0
 
-sentinel :: XML
-sentinel 
-  = Element "" [] []
+applyOp :: Op -> Value -> Value -> Value
+-- Pre: The values have the appropriate types (I or A) for each primitive
+applyOp Add (I v1) (I v2) = I (v1+v2)
+applyOp Mul (I v1) (I v2) = I (v1*v2)
+applyOp Less (I v1) (I v2) = I (toBool (v1 < v2))
+applyOp Equal (I v1) (I v2) = I (toBool (v1 == v2))
+applyOp Index (A array) (I i) = case null v of
+                                  True -> I 0
+                                  False -> I ((snd . head) v)
+  where v = filter (\(index, v) -> index == i) array
 
-addText :: String -> Stack -> Stack
--- Pre: There is at least one Element on the stack
-addText input (elem:stack) = (addChild (Text input) elem): stack
+bindArgs :: [Id] -> [Value] -> State
+-- Pre: the lists have the same length
+bindArgs ids vs
+  = zipWith (\id v -> (id, (Local, v))) ids vs
 
-popAndAdd :: Stack -> Stack
--- Pre: There are at least two Elements on the stack
-popAndAdd (e1:e2:es) = (addChild e1 e2) : es
+evalArgs :: [Exp] -> [FunDef] -> State -> [Value]
+evalArgs es funs state
+  = map eval' es
+  where eval' e = eval e funs state
 
-parseAttributes :: String -> (Attributes, String)
--- Pre: The XML attributes string is well-formed
-parseAttributes input = parseAttributes' (skipSpace input) [] []
-  where parseAttributes' total@(x:xs) attrs names
-          | isSpace x = parseAttributes' xs attrs names
-          | x == '=' = parseAttributes' xs attrs names
-          | x == '\"' = parseAttributes' (drop (length val +1) xs) ((n, val):attrs) ns
-          | x == '>' = (attrs, xs)
-          | otherwise = parseAttributes' rest attrs (name:names)
-          where val = takeWhile (/='\"') xs
-                (name, rest) = parseName total
-                (n:ns) = names
+eval :: Exp -> [FunDef] -> State -> Value
+-- Pre: All expressions are well formed
+-- Pre: All variables referenced have bindings in the given state
+eval (Const c) _ _ = c
+eval (Var id) _ state = getValue id state
+eval (OpApp op e1 e2) funs state = applyOp op (eval e1 funs state) (eval e2 funs state)
+eval (Cond e1 e2 e3) funs state = case (eval e1 funs state) of
+                                    I 1 -> eval e2 funs state
+                                    I 0 -> eval e3 funs state
+eval (FunApp id es) funs state
+  = eval e funs state'
+  where (as, e) = lookUp id funs
+        vs = evalArgs es funs state
+        state' = bindArgs as vs ++ state
 
-parse :: String -> XML
--- Pre: The XML string is well-formed
-parse s
-  = parse' (skipSpace s) [sentinel]
-  where parse' input@(x:xs) stack
-          | x == '<' = case head xs of
-                         '/' ->
-                         otherwise -> 
-          | otherwise 
-parse s
-  = parse' (skipSpace s) [sentinel]
-  where parse' input@(x:xs) stack
-          | x == '<' = case head xs of
-                         '/' -> parse' xs stack
-                         otherwise -> case curName == n of
-                                        True -> case null attrsInput of
-                                                  True -> parse' inputAfterAttrs stack
-                                                  False -> parse' inputAfterAttrs ((Element curName newAttrs xmls):ys)
-                                        False -> case null attrsInput of
-                                                  True -> parse' inputAfterAttrs stack
-                                                  False -> parse' (tail attrsInput) ((Element name newAttrs []):stack)
-         | otherwise = parse' inputAfterTextString (addText textString stack) 
-          where (name, rest) = parseName input
-
-                 attrsInput = takeWhile (/= '>') rest
-                 inputAfterAttrs = drop (length attrsInput +1) rest 
-                 newAttrs = parseAttributes attrsInput
-                 ((Element curName attrs xmls):xmls') = stack
-
-                 textString = takeWhile (/='>') input
-                 inputAfterTextString = drop (length textString) input
-                 
-
-
-parse' :: String -> Stack -> XML
-parse' = undefined
-
--------------------------------------------------------------------------
+---------------------------------------------------------------------
 -- Part III
 
-type Context = XML
+executeStatement :: Statement -> [FunDef] -> [ProcDef] -> State -> State
+-- Pre: All statements are well formed 
+-- Pre: For array element assignment (AssignA) the array variable is in scope,
+--      i.e. it has a binding in the given state
+executeStatement (Assign id e) funs procs state
+  = updateVar (id,(eval e funs state)) state
+executeStatement (AssignA id e1 e2) funs procs state
+  = updateVar (id, assignArray array (eval e1 funs state) (eval e2 funs state)) state 
+  where array = snd $ lookUp id state 
+executeStatement (If e b1 b2) funs procs state
+  = case eval e funs state of
+      I 1 -> executeBlock b1 funs procs state
+      I 0 -> executeBlock b2 funs procs state
+executeStatement (While e b) funs procs state
+  = case eval e funs state of
+      I 1 -> executeStatement (While e b) funs procs (executeBlock b funs procs state)
+      I 0 -> state
+executeStatement (Call x p es) funs procs state
+  = case x of
+      "" -> (getGlobals stateAfterPro) ++ (getLocals state)
+      otherwise ->  case inGlobals x state of
+                      True -> (getGlobals stateAfterPro) ++ (getLocals state)
+                      False -> [return] ++ (getGlobals stateAfterPro) ++ (getLocals state)
+  where (as, b) = lookUp p procs
+        vs = evalArgs es funs state
+        state' = bindArgs as vs ++ (getGlobals state)
+        stateAfterPro = executeBlock b funs procs state'
+        return = (x, (Local, v))
+        (returnId, (Local, v)) = head $filter (\(id, (Local, v)) -> id == "$ret") (getLocals stateAfterPro) 
 
-type XSL = XML
+executeStatement (Return e) funs procs state
+  = updateVar ("$ret", eval e funs state) state
 
--- Parses XSL and XML source documents and transforms the latter using the
--- former. The output is written to the given file (String).
--- Example use:
---   output "out.html" filmsXSL films
--- To render output.html in a browser, type this at the Linux prompt:
---   firefox output.html &
-output :: String -> XML -> XML -> IO()
-output file xsl source
-  = writeFile file (showXMLs (expandXSL xsl source))
+executeBlock :: Block -> [FunDef] -> [ProcDef] -> State -> State
+-- Pre: All code blocks and associated statements are well formed
+executeBlock [] func procs state
+  = state
+executeBlock (x:xs) funs procs state
+  = executeBlock xs funs procs (executeStatement x funs procs state)
 
-expandXSL :: XSL -> XML -> [XML]
-expandXSL xsl source 
-  = expandXSL' root xsl
+---------------------------------------------------------------------
+-- Part IV
+
+translate :: FunDef -> Id -> [(Id, Id)] -> ProcDef
+translate (name, (as, e)) newName nameMap 
+  = (newName, (as, b ++ [Return e']))
   where
-    root = Element "/" [] [source] 
+    (b, e', ids') = translate' e nameMap ['$' : show n | n <- [1..]] 
 
-expandXSL' :: Context -> XSL -> [XML]
-expandXSL' 
+translate' :: Exp -> [(Id, Id)] -> [Id] -> (Block, Exp, [Id])
+translate' 
   = undefined
 
--------------------------------------------------------------------------
--- Test data for Parts I and II
+---------------------------------------------------------------------
+-- PREDEFINED FUNCTIONS
 
--- Simple test cases (no whitespace)
-s1, s2, s3 :: String
-s1
-  = "<a>A</a>"
-s2 
-  = "<a x=\"1\"><b>A</b><b>B</b></a>"
-s3
-  = "<a>\
-      \<b>\
-        \<c att=\"att1\">text1</c>\
-        \<c att=\"att2\">text2</c>\
-      \</b>\
-      \<b>\
-        \<c att=\"att3\">text3</c>\
-        \<d>text4</d>\
-      \</b>\
-    \</a>"
+-- A helpful predefined lookUp function...
+lookUp :: (Eq a, Show a) => a -> [(a, b)] -> b
+lookUp x t
+  = fromMaybe (error ("\nAttempt to lookUp " ++ show x ++ 
+                      " in a table that only has the bindings: " ++ 
+                      show (map fst t))) 
+              (lookup x t)
 
--- Parsed versions of the above
-x1, x2, x3 :: XML
-x1
-  = Element "a" [] [Text "A"]
-x2
-  = Element "a"
-            [("x","1")]
-            [Element "b" [] [Text "A"],
-             Element "b" [] [Text "B"]]
-x3
-  = Element "a" 
-            [] 
-            [Element "b" 
-                     [] 
-                     [Element "c"
-                              [("att","att1")] 
-                              [Text "text1"],
-                      Element "c" 
-                              [("att","att2")]
-                              [Text "text2"]],
-             Element "b" 
-                     [] 
-                     [Element "c" 
-                              [("att","att3")] 
-                              [Text "text3"],
-                      Element "d" 
-                              [] 
-                              [Text "text4"]]]
+ -- Turns an int into an Exp...
+intToExp :: Int -> Exp
+intToExp n
+  = Const (I n)
 
-casablanca :: String 
-casablanca
-  = "<film title=\"Casablanca\">\n  <director>Michael Curtiz</director>\n  <year>1942\
-    \</year>\n</film>\n\n\n"
+-- Turns a list of ints into an array Exp...
+listToExp :: [Int] -> Exp
+listToExp 
+  = Const . listToVal
 
-casablancaParsed :: XML 
-casablancaParsed
-  = Element "film" 
-            [("title","Casablanca")] 
-            [Text "\n  ",
-             Element "director" [] [Text "Michael Curtiz"],
-             Text "\n  ",
-             Element "year" [] [Text "1942"],
-             Text "\n"]
+-- Turns a list of ints into an array Value...
+listToVal :: [Int] -> Value
+listToVal xs
+  = A (zip [0..] xs)
 
--- Films mark-up of Figure 1
-films :: String
-films
-  = "<filmlist>\n\
-    \  <film title = \"Rear Window\">\n\
-    \    <director>Alfred Hitchcock</director>\n\
-    \    <composer>Franz Waxman</composer>\n\
-    \    <year>1954</year>\n\
-    \  </film>\n\
-    \  <film   title =  \"2001: A Space Odyssey\">\n\
-    \    <director>Stanley Kubrick</director>\n\
-    \    <composer>Richard Strauss</composer>\n\
-    \    <composer>Gyorgy Ligeti</composer>\n\
-    \    <composer>Johann Strauss</composer>\n\
-    \    <year>1968</year>\n\
-    \  </film>\n\
-    \  <film title=\"Lawrence of Arabia\"  >\n\
-    \    <duration>228</duration>\n\
-    \    <director>David Lean</director>\n\
-    \    <composer>Maurice Jarre</composer>\n\
-    \  </film>\n\
-    \</filmlist>\n\n\n"
+-- memoise generates a procedure that caches values computed by function f.  
+-- In general f will be a variant of some originally recursive function 
+-- that calls the procedure generated here (named p) instead of itself.
+-- Arguments:
+--    p = procedure name; a = argument name; f = function variant; 
+--    pt = 'isPresent' table; mt = memo table.
 
--- Parsed version of films ('parse films'), suitably formatted
-filmsParsed :: XML
-filmsParsed
-  = Element "filmlist" 
-            [] 
-            [Text "\n  ",
-             Element "film" [("title","Rear Window")]
-                            [Text "\n    ",
-                             Element "director" [] [Text "Alfred Hitchcock"],
-                             Text "\n    ",
-                             Element "composer" [] [Text "Franz Waxman"],
-                             Text "\n    ",
-                             Element "year" [] [Text "1954"],
-                             Text "\n  "],
-             Text "\n  ",
-             Element "film" [("title","2001: A Space Odyssey")] 
-                            [Text "\n    ",
-                             Element "director" [] [Text "Stanley Kubrick"],
-                             Text "\n    ",
-                             Element "composer" [] [Text "Richard Strauss"],
-                             Text "\n    ",
-                             Element "composer" [] [Text "Gyorgy Ligeti"],
-                             Text "\n    ",
-                             Element "composer" [] [Text "Johann Strauss"],
-                             Text "\n    ",
-                             Element "year" [] [Text "1968"],
-                             Text "\n  "],
-             Text "\n  ",
-             Element "film" [("title","Lawrence of Arabia")] 
-                            [Text "\n    ",
-                             Element "duration" [] [Text "228"],
-                             Text "\n    ",
-                             Element "director" [] [Text "David Lean"],
-                             Text "\n    ",
-                             Element "composer" [] [Text "Maurice Jarre"],
-                             Text "\n  "],
-             Text "\n"]
+memoise :: Id -> Id -> Id -> Id -> Id -> ProcDef
+memoise p a f pt mt
+  = (p, 
+     ([a], [If (OpApp Equal (OpApp Index (Var pt) (Var a)) (Const (I 0)))
+               [Call "x" f [Var a],
+                AssignA pt (Var a) (Const (I 1)),
+                AssignA mt (Var a) (Var "x")
+               ]
+               [],
+            Return (OpApp Index (Var mt) (Var a))
+           ]
+     )
+    )
 
--------------------------------------------------------------------------
--- XSL tests
 
--- value-of test cases
-xsl1, xsl2, xsl3, xsl4, xsl5, xsl6, xsl7, 
-  xsl8, xsl9 :: String
-xsl1
-  = "<value-of select = \"a/b/c\"></value-of>"
-xsl2
-  = "<value-of select = \"a/b\"></value-of>"
-xsl3
-  = "<value-of select = \"a/b/d\"></value-of>"
-xsl4
-  = "<value-of select = \"a/b/c/@att\"></value-of>"
-xsl5
-  = "<value-of select = \"./a/./b/c/./.\"></value-of>"
-xsl6
-  = "<t1><t2>Preamble</t2><t3><value-of select = \"a/b/c\"></value-of></t3></t1>"
+---------------------------------------------------------------------
+-- Predefined States, arrays and expressions for testing...
 
--- for-each test cases
-xsl7
-  = "<for-each select=\"a/b/c\"><value-of select=\"./@att\"></value-of>\
-    \</for-each>" 
-xsl8
-  = "<for-each select=\"a/b\"><t><value-of select=\"c\"></value-of></t>\
-    \</for-each>" 
-xsl9
-  = "<for-each select=\"a/b\"><t1><value-of select=\"absent\"></value-of>\
-    \</t1></for-each>"
-        
--- Parsed versions of the above
-xsl1Parsed, xsl2Parsed, xsl3Parsed, xsl4Parsed, xsl5Parsed,
-  xsl6Parsed, xsl7Parsed, xsl8Parsed, xsl9Parsed :: XML
-xsl1Parsed
-  = Element "value-of" [("select","a/b/c")] []
-xsl2Parsed
-  = Element "value-of" [("select","a/b")] []
-xsl3Parsed
-  = Element "value-of" [("select","a/b/d")] []
-xsl4Parsed
-  = Element "value-of" [("select","a/b/c/@att")] []
-xsl5Parsed
-  = Element "value-of" [("select","./a/./b/c/./.")] []
-xsl6Parsed
-  = Element "t1" 
-            [] 
-            [Element "t2" [] [Text "Preamble"],
-             Element "t3" [] [Element "value-of" [("select","a/b/c")] []]]
+sampleState, gState, fibState :: State
+sampleState 
+  = [("x", (Local, I 5)), ("y", (Global, I 2)), ("a", (Global, listToVal [4,2,7]))]
 
-xsl7Parsed
-  = Element "for-each" 
-            [("select","a/b/c")] 
-            [Element "value-of" [("select","./@att")] []]
-xsl8Parsed
-  = Element "for-each" 
-            [("select","a/b")] 
-            [Element "t" [] [Element "value-of" [("select","c")] []]]
-xsl9Parsed
-  = Element "for-each" 
-            [("select","a/b")] 
-            [Element "t1" [] [Element "value-of" [("select","absent")] []]]
+gState 
+  = [("gSum", (Global, I 0))]
 
--- XSL template for building a films summary (example from spec.)
-filmsXSL :: String
-filmsXSL
-  = "<html>\n\
-    \<body>\n\
-    \  <h2>Film List</h2>\n\
-    \  <table border=\"1\">\n\
-    \    <tr>\n\
-    \      <th align=\"left\">Title</th>\n\
-    \      <th align=\"left\">Director</th>\n\
-    \      <th align=\"left\">Principal composer</th>\n\
-    \    </tr>\n\
-    \    <for-each select=\"filmlist/film\">\n\
-    \      <tr>\n\
-    \        <td><value-of select=\"@title\"></value-of></td>\n\
-    \        <td><value-of select=\"director\"></value-of></td>\n\
-    \        <td><value-of select=\"composer\"></value-of></td>\n\
-    \      </tr>\n\
-    \    </for-each>\n\
-    \  </table>\n\
-    \</body>\n\
-    \</html>"
+fibState 
+  = [("fibPres", (Global, A [])), ("fibTab", (Global, A []))]
 
--- XSL template for building a list of composers (example from spec.)
-composersXSL :: String
-composersXSL
-  = "<for-each select=\"filmlist/film\">\
-      \<h2><value-of select=\"@title\"></value-of> composers</h2>\
-      \<ul>\
-      \<for-each select=\"composer\">\
-        \<li><value-of select=\".\"></value-of></li>\
-      \</for-each>\
-      \</ul>\
-    \</for-each>"
+sampleArray :: Exp
+sampleArray 
+  = Const (listToVal [9,5,7,1])
+
+e1, e2, e3, e4, e5 :: Exp
+e1 = Const (I 1)
+e2 = Var "y"
+e3 = OpApp Add (Var "x") (Const (I 2))
+e4 = Cond e1 (Var "x") (Const (I 9))
+e5 = FunApp "fib" [Const (I 6)]
+
+---------------------------------------------------------------------
+-- Example (pure) functions for testing...
+
+-- Equivalent of Haskell's max function...
+biggest :: FunDef
+biggest
+  = ("biggest",
+     (["m", "n"], Cond (OpApp Less (Var "m") (Var "n"))
+                       (Var "n")
+                       (Var "m"))
+    )
+
+-- Factorial, equivalent to: if n == 0 then 1 else n * fact (n - 1)...
+fac :: FunDef
+fac
+  = ("fac",
+     (["n"], Cond (OpApp Equal (Var "n") (intToExp 0))
+                  (intToExp 1)
+                  (OpApp Mul (Var "n") 
+                             (FunApp "fac" [OpApp Add (Var "n") (intToExp (-1))])))
+    )
+
+-- Sums elements 0..n of an array...
+sumA :: FunDef
+sumA
+  = ("sumA",
+     (["a", "n"], Cond (OpApp Less (Var "n") (Const (I 0)))
+                       (Const (I 0))
+                       (OpApp Add (OpApp Index (Var "a") (Var "n"))
+                                  (FunApp "sumA"
+                                     [Var "a", OpApp Add (Var "n")
+                                                         (Const (I (-1)))]))
+     )
+    )
+
+
+-- Vanilla Haskell fib
+fibH :: Int -> Int
+-- Pre: n > 0
+fibH n 
+  = if n < 3 then 1 else fibH (n-1) + fibH (n-2)
+
+-- fib in the purely functional subset
+fib :: FunDef
+fib
+  = ("fib",
+     (["n"], Cond (OpApp Less (Var "n") (Const (I 3)))
+                  (Const (I 1))
+                  (OpApp Add (FunApp "fib" [OpApp Add (Var "n") (Const (I (-1)))])
+                             (FunApp "fib" [OpApp Add (Var "n") (Const (I (-2)))]))
+     )
+    )
+
+-- May be useful for testing translate...?
+testFun :: FunDef
+testFun
+  = ("testFun",
+     (["x", "y"], Cond (OpApp Equal (Var "x") (Var "y"))
+                       (Cond (FunApp "p" [Var "y"])
+                             (OpApp Add (Var "x") (Const (I 1)))
+                             (OpApp Add (Var "x") (Var "y")))
+                       (OpApp Add (FunApp "g" [Var "y"]) (Const (I 2))))
+    )
+
+---------------------------------------------------------------------
+-- Example procedures for testing...
+
+-- Add two integers and assign the result to a global variable, gSum, 
+-- that is assumed to be in scope when the procedure is called...
+gAdd :: ProcDef
+gAdd
+  = ("gAdd", 
+     (["x", "y"], [Assign "gSum" (OpApp Add (Var "x") (Var "y"))])
+    )
+
+-- Sums elements 0..n of an array...
+sumA' :: ProcDef
+sumA'
+  = ("sumA'",
+     (["a", "n"], [Assign "s" (Const (I 0)),
+                   Assign "i" (Const (I 0)),
+                   Assign "limit" (OpApp Add (Var "n") (Const (I 1))),
+                   While (OpApp Less (Var "i") (Var "limit"))
+                         [Assign "s" (OpApp Add (Var "s") 
+                                                (OpApp Index (Var "a") (Var "i"))),
+                          Assign "i" (OpApp Add (Var "i") (Const (I 1)))
+                         ],
+                   Return (Var "s")]
+     )
+    )
+
+-- A procedural version of fib...
+fibP :: ProcDef
+-- Pre: n > 0
+fibP 
+  = ("fibP", 
+     (["n"], [If (OpApp Less (Var "n") (Const (I 3))) 
+                 [Return (Const (I 1))]
+                 [Call "f1" "fibP" [OpApp Add (Var "n") (Const (I (-1)))], 
+                  Call "f2" "fibP" [OpApp Add (Var "n") (Const (I (-2)))], 
+                  Return (OpApp Add (Var "f1") (Var "f2"))
+                 ]
+             ]
+     )
+    )
+
+fibManager :: ProcDef
+fibManager
+  = ("fibManager",
+     (["n"], [If (OpApp Equal (OpApp Index (Var "fibPres") (Var "n")) 
+                              (Const (I 0))) 
+                 [Call "x" "fibM" [Var "n"], 
+                  AssignA "fibPres" (Var "n") (Const (I 1)), 
+                  AssignA "fibTab" (Var "n") (Var "x")
+                 ] 
+                 [], 
+              Return (OpApp Index (Var "fibTab") (Var "n"))
+             ]
+     )
+    )
+
+fibM :: ProcDef
+-- Pre: n > 0
+-- The value of fibMGenerator below
+fibM 
+  = ("fibM", 
+     (["n"], [If (OpApp Less (Var "n") (Const (I 3)))
+                 [Assign "$3" (Const (I 1))]
+                 [Call "$1" "fibManager" [OpApp Add (Var "n") (Const (I (-1)))],
+                  Call "$2" "fibManager" [OpApp Add (Var "n") (Const (I (-2)))],
+                  Assign "$3" (OpApp Add (Var "$1") (Var "$2"))
+                 ],
+              Return (Var "$3")
+             ]
+     )
+    )
+
+---------------------------------------------------------------------
+-- Sample top-level calls for testing...
+
+-- This instantiates the table manager template (predefined)...
+fibTableManager :: ProcDef
+fibTableManager 
+  = memoise "fibManager" "n" "fibM" "fibPres" "fibTab"
+
+-- This uses the translate function to build the procedural, memoised,
+-- version of fib...
+fibMGenerator :: ProcDef
+fibMGenerator 
+  = translate fib "fibM" [("fib", "fibManager")] 
+                   
+
+-- Useful predefined executors...
+
+execBiggest :: Int -> Int -> State
+execBiggest m n
+  = executeBlock [Return (FunApp "biggest" [intToExp m, intToExp n])] [biggest] [] []
+
+execFac :: Int -> State
+execFac n
+  = executeBlock [Return (FunApp "fac" [intToExp n])] [fac] [] []
+
+execSumA :: [Int] -> Int -> State
+execSumA a n
+  = executeBlock [Return (FunApp "sumA" [listToExp a, intToExp n])] [sumA] [] []
+
+execGAdd :: Int -> Int -> State
+execGAdd x y
+  = executeBlock [Call "" "gAdd" [intToExp x, intToExp y]] [] [gAdd] gState
+
+execSumA' :: [Int] -> Int -> State
+execSumA' a n
+  = executeBlock [Call "s" "sumA'" [listToExp a, intToExp n]] [] [sumA'] []
+
+execGlobalSumA' :: [Int] -> Int -> State
+execGlobalSumA' a n
+  = executeBlock [Call "s" "sumA'" [listToExp a, intToExp n]] 
+                 [] [sumA'] [("s", (Global, I 0))]
+
+execFibP :: Int -> State
+execFibP n 
+  = executeBlock [Call "f" "fibP" [intToExp n]] [] [fibP] fibState
+
+execFibM :: Int -> State
+execFibM n 
+  = executeBlock [Call "f" "fibM" [intToExp n]] [] [fibM, fibManager] fibState
